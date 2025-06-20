@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd">
+	<http:listener-config name="HTTP_Listener_config" doc:name="HTTP Listener config" doc:id="1143842b-74e5-4c99-956f-8b99eb919d10" >
+		<http:listener-connection host="0.0.0.0" port="${http.port}" />
+	</http:listener-config>
+	<configuration-properties doc:name="Configuration properties" doc:id="568f50eb-d89f-4192-9f4e-8af8362b1b73" file="${mule.env}.yaml" />
+	<flow name="demo-cicdFlow" doc:id="0c9e96cb-2e50-482d-8097-cfec65228ee2" >
+		<http:listener doc:name="Listener" doc:id="f4120cc5-af3f-4de6-a8d6-477869e8cd7a" config-ref="HTTP_Listener_config" path="/hello"/>
+		<logger level="INFO" doc:name="Logger" doc:id="5b8d9bcb-d9a8-4dd5-b25e-36216a222ee0" />
+		<set-payload value='#[output json --- "Hello!"]' doc:name="Set Payload" doc:id="7659819d-6b66-4373-9316-05bad1abf7a9" />
+	</flow>
+</mule>
