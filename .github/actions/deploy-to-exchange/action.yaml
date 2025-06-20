@@ -1,0 +1,38 @@
+name: "Deploy to Exchange"
+description: "Deploys a JAR to Anypoint Exchange"
+
+inputs:
+  targetEnvironment:
+    description: "Target environment name (e.g. DEV, QA, PRD). Used to set -Dmule.env"
+    required: true
+  clientId:
+    description: "Anypoint platform client ID used for authentication"
+    required: true
+  clientSecret:
+    description: "Anypoint platform client secret used for authentication"
+    required: true
+  connectedAppClientId:
+    description: "Connected App Client ID for Anypoint deployment"
+    required: true
+  connectedAppClientSecret:
+    description: "Connected App Client Secret for Anypoint deployment"
+    required: true
+  customAppName:
+    description: "Optional app name to override the default auto-generated name'"
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: Deploy to Exchange
+      shell: bash
+      run: |
+        lower_env=$(echo "${{ inputs.targetEnvironment }}" | tr '[:upper:]' '[:lower:]')
+
+        mvn deploy --settings .maven/settings.xml -DskipMunitTests \
+          -Dmule.env="$lower_env" \
+          -Dclient.id=${{ inputs.clientId }} \
+          -Dclient.secret=${{ inputs.clientSecret }} \
+          -Dconnected_app_client_id=${{ inputs.connectedAppClientId }} \
+          -Dconnected_app_client_secret=${{ inputs.connectedAppClientSecret }} \
+          -Dcustom.final.name=${{ inputs.customAppName }}

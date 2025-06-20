@@ -1,0 +1,170 @@
+name: Deploy to Cloudhub 2.0
+description: "Deploy to env ${} n CloudHub 2.0"
+
+inputs:
+  targetEnvironment:
+    required: true
+    description: "Desired environment to deploy"
+  muleKey:
+    required: true
+    description: "Mule Key"
+  connectedAppClientId:
+    required: true
+    description: "Connected App Client ID for Exchange authentication"
+  connectedAppClientSecret:
+    required: true
+    description: "Connected App Client Secret for Exchange authentication"
+  clientId:
+    required: true
+    description: "Client ID for authentication"
+  clientSecret:
+    required: true
+    description: "Client Secret for authentication"
+  target:
+    required: true
+    description: "Target deployment name"
+  releaseChannel:
+    required: true
+    description: "Release channel name"
+  wireLogging:
+    required: true
+    description: "WireLog Level"
+  replicas:
+    required: true
+    description: "Number of replicas"
+  vcores:
+    required: true
+    description: "Number of vCores"
+  extraArgs:
+    required: false
+    description: "Extra application arguments definded in the pom.xml using APP_ prefix. E.G: <remote.sftp.inputDir>${APP_REMOTE_SFTP_INPUTDIR}</remote.sftp.inputDir>"
+  customAppName:
+    required: false
+    description: 'Optional app name to override the default auto-generated name'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout this repo
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 
+        ref: ${{ github.ref_name }}
+  
+    - name: Cache dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2/repository
+        key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+        restore-keys: |
+          ${{ runner.os }}-maven-
+  
+    - name: Download artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.customAppName || 'artifacts' }}
+    
+    - name: Check if artifact is SNAPSHOT
+      id: check_snapshot
+      run: |
+        name=$(ls *.jar | head -1)
+        echo "artifactName=$name" >> $GITHUB_OUTPUT
+    
+        if [[ "$name" == *SNAPSHOT* ]]; then
+          echo "isSnapshot=true" >> $GITHUB_OUTPUT
+        else
+          echo "isSnapshot=false" >> $GITHUB_OUTPUT
+        fi
+      shell: bash
+  
+    - name: Deploy SNAPSHOT build
+      if: ${{ steps.check_snapshot.outputs.isSnapshot == 'true' }}
+      uses: p-amers-mx-telmex-red-nacional/telmex-mulesoft/.github/actions/deploy-to-exchange@dev
+      with:
+        targetEnvironment: ${{ inputs.targetEnvironment }}
+        clientId: ${{ inputs.clientId }}
+        clientSecret: ${{ inputs.clientSecret }}
+        connectedAppClientId: ${{ inputs.connectedAppClientId }}
+        connectedAppClientSecret: ${{ inputs.connectedAppClientSecret }}
+        customAppName: ${{ inputs.customAppName }}
+    
+    - name: Deploy Release build (QA only)
+      if: ${{ steps.check_snapshot.outputs.isSnapshot == 'false' && github.event.inputs.environment == 'QA' }}
+      uses: ./.github/actions/deploy-to-exchange
+      with:
+        targetEnvironment: ${{ inputs.targetEnvironment }}
+        clientId: ${{ inputs.clientId }}
+        clientSecret: ${{ inputs.clientSecret }}
+        connectedAppClientId: ${{ inputs.connectedAppClientId }}
+        connectedAppClientSecret: ${{ inputs.connectedAppClientSecret }}
+        customAppName: ${{ inputs.customAppName }}
+
+    - name: Deploy the application
+      run: |
+        artifactName=$(ls *.jar | head -1)
+        lower_env=$(echo "$targetEnvironment" | tr '[:upper:]' '[:lower:]')
+    
+        artifactId=$(mvn help:evaluate -Dexpression=project.artifactId -q -DforceStdout)
+        baseAppName=$(echo "$artifactId" | sed 's/-impl$//')
+
+        if [ -n "$customAppName" ]; then
+          baseAppName="$customAppName"
+        fi
+
+        if [[ "$targetEnvironment" == "PRD" ]]; then
+          applicationName="$baseAppName"
+        else
+          applicationName="${baseAppName}-${lower_env}"
+        fi
+
+        if [[ "$applicationName" == *"-xapi-"* ]]; then
+          visualizerLayer="Experience"
+        elif [[ "$applicationName" == *"-papi-"* ]]; then
+          visualizerLayer="Process"
+        elif [[ "$applicationName" == *"-sapi-"* ]]; then
+          visualizerLayer="System"
+        else
+          visualizerLayer="Process"
+        fi
+
+
+        echo "Replace Custom Final Name"
+        artifactName=$(echo "$artifactName" | sed "s/\${custom.final.name}/$customAppName/")
+        echo "$artifactName"
+        #sed -i 's/\${custom.final.name}/'"$customAppName"'/g' pom.xml
+
+
+        CMD="mvn -X deploy --settings .maven/settings.xml -DskipMunitTests -DmuleDeploy \
+        -Dmule.artifact=\"$artifactName\" \
+        -Dmule.env=\"$lower_env\" \
+        -Dmule.key=\"$muleKey\" \
+        -Dclient.id=\"$clientId\" \
+        -Dclient.secret=\"$clientSecret\" \
+        -Dconnected_app_client_id=$connectedAppClientId \
+        -Dconnected_app_client_secret=$connectedAppClientSecret \
+        -Denvironment=\"$targetEnvironment\" \
+        -Dtarget=\"$target\" \
+        -Drelease.channel=\"$releaseChannel\" \
+        -Dwire.logging.log.level=\"$wireLogging\" \
+        -Dreplicas=\"$replicas\" \
+        -Dvcores=\"$vcores\" \
+        -Dapplication.name=\"$applicationName\" \
+        -Danypoint.platform.visualizer.layer=\"$visualizerLayer\" \
+        $extraArgs"
+        echo "Executing Ger command: $CMD"
+        eval $CMD
+      shell: bash
+      env:
+        targetEnvironment: ${{ inputs.targetEnvironment }}
+        muleKey: ${{ inputs.muleKey }}
+        clientId: ${{ inputs.clientId }}
+        clientSecret: ${{ inputs.clientSecret }}
+        connectedAppClientId: ${{ inputs.connectedAppClientId }}
+        connectedAppClientSecret: ${{ inputs.connectedAppClientSecret }}
+        target: ${{ inputs.target }}
+        releaseChannel: ${{ inputs.releaseChannel }}
+        wireLogging: ${{ inputs.wireLogging }}
+        replicas: ${{ inputs.replicas }}
+        vcores: ${{ inputs.vcores }}
+        extraArgs: ${{ inputs.extraArgs }}
+        customAppName: ${{ inputs.customAppName}}

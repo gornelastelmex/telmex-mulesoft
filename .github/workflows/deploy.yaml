@@ -1,0 +1,241 @@
+name: Deploy to CH2.0 environment
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Target environment for deployment (e.g., DEV, QA, etc.)'
+        required: true
+        type: string
+      app_name:
+        description: 'Optional app name to override the default auto-generated name'
+        required: false
+        type: string
+      apps_config:
+        description: 'Optional JSON string with environment-specific arguments for all apps'
+        required: false
+        type: string
+    secrets:
+      mule_key:
+        required: true
+      connected_app_client_id:
+        required: true
+      connected_app_client_secret:
+        required: true
+      anypoint_client_id:
+        required: true
+      anypoint_client_secret:
+        required: true
+
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  build:
+    runs-on: #ubuntu-latest
+      group: gps-github-test-runners
+    timeout-minutes: 15
+    environment: ${{ inputs.environment }}  
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          distribution: "zulu"
+          java-version: 17
+
+      - name: Create release
+        if: ${{ inputs.environment == 'QA' }}
+        run: |
+          mvn versions:set -DremoveSnapshot versions:commit
+          version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+
+          git add pom.xml
+          git commit -m "Create release $version"
+          git push https://x-access-token:$githubToken@github.com/${{ github.repository }}.git develop
+
+          git tag $version
+          git push https://x-access-token:$githubToken@github.com/${{ github.repository }}.git $version
+        shell: bash
+        env:
+          githubToken: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build with Maven
+        run: |
+          branch_name=$(git symbolic-ref --short -q HEAD || true)
+          if [ -n "$branch_name" ]; then
+            git pull
+          fi
+
+          mvn -B package --settings .maven/settings.xml --file pom.xml -DskipMunitTests \
+          -Dconnected_app_client_id=${{ secrets.connected_app_client_id }} \
+          -Dconnected_app_client_secret=${{ secrets.connected_app_client_secret }}
+        shell: bash
+        env:
+          connectedAppClientId: ${{ secrets.connected_app_client_id }}
+          connectedAppClientSecret: ${{ secrets.connected_app_client_secret }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.app_name || 'artifacts' }}
+          path: target/*.jar
+  
+  deploy:
+    needs: build
+    runs-on: #ubuntu-latest
+      group: gps-github-test-runners
+    timeout-minutes: 15
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+      
+      - name: Build GitHub Property Args from pom.xml 
+        id: generate_args
+        env:
+          APPS_CONFIG: ${{ inputs.apps_config }}
+          TARGET_ENV: ${{ inputs.environment }}
+          TARGET_APP: ${{ inputs.app_name }}
+        run: |
+          shopt -s lastpipe
+          ARG_STRING=""
+          TEMP_ARGS=""
+          VARS_JSON='${{ toJson(vars) }}'
+          ENV_VARS_JSON=""
+          
+          echo "🔍 Extracting <properties> section from pom.xml..."
+          PROPERTY_VARS=$(awk '/<properties>/,/<\/properties>/' pom.xml 2>/dev/null | grep -o '\${APP_[^}]*}' | sed 's/[${}]//g') || true
+
+          if [[ -z "$APPS_CONFIG" ]]; then
+            echo "📦 No apps_config provided — falling back to GitHub Actions vars"
+
+            if [[ -n "$PROPERTY_VARS" ]]; then
+              echo "📘 Found properties: $PROPERTY_VARS"
+              echo "$PROPERTY_VARS" | while IFS= read -r var_ref; do
+                if [[ -n "$var_ref" ]]; then
+                  val=$(echo "$VARS_JSON" | jq -r --arg v "$var_ref" '.[$v]')
+                  if [[ "$val" != "null" && -n "$val" ]]; then
+                    TEMP_ARGS="$TEMP_ARGS -D${var_ref}=${val}"
+                  else
+                    echo "⚠️ GitHub variable '$var_ref' is not set or empty"
+                  fi
+                fi
+              done
+            else
+              echo "ℹ️ No <properties> with \${APP_} references found in pom.xml"
+            fi
+
+          else
+            echo "📦 apps_config JSON provided — parsing config for environment: $TARGET_ENV"
+            ENV_VARS_JSON=$(echo "$APPS_CONFIG" | jq -r --arg env "$TARGET_ENV" --arg app "$TARGET_APP" '.[$env][$app] // {}')
+
+            if [[ -z "$ENV_VARS_JSON" || "$ENV_VARS_JSON" == "null" ]]; then
+              echo "⚠️ No config found for environment '$TARGET_ENV' in apps_config"
+            fi
+
+            if [[ -n "$PROPERTY_VARS" ]]; then
+              echo "📘 Found properties: $PROPERTY_VARS"
+              echo "$PROPERTY_VARS" | while IFS= read -r var_ref; do
+                if [[ -n "$var_ref" ]]; then
+                  echo "🔎 Looking up variable key: '$var_ref'"
+                  if [[ "$var_ref" == "APP_ID" ]]; then
+                    val=$(echo "$VARS_JSON" | jq -r --arg v "$var_ref" '.[$v]')
+                  else
+                    val=$(echo "$ENV_VARS_JSON" | jq -r --arg v "$var_ref" '.[$v]')
+                  fi
+
+                  if [[ "$val" != "null" && -n "$val" ]]; then
+                    safe_val=$(printf '%q' "$val")
+                    echo $safe_val
+                    TEMP_ARGS="$TEMP_ARGS -D${var_ref}=${safe_val}"
+                  else
+                    echo "⚠️ Variable '$var_ref' is not set or empty"
+                  fi
+                fi
+              done
+            else
+              echo "ℹ️ No <properties> with \${APP_} references found in pom.xml"
+            fi
+          fi
+
+          ARG_STRING="$TEMP_ARGS"
+          echo "✅ Final Generated ARG_STRING: $ARG_STRING"
+          echo "ARG_STRING=$ARG_STRING" >> "$GITHUB_OUTPUT"
+        shell: bash
+      
+      - name: Deploy to CH2.0
+        uses: p-amers-mx-telmex-red-nacional/telmex-mulesoft/.github/actions@dev
+        with:
+          targetEnvironment: ${{ inputs.environment }}
+          muleKey: ${{ secrets.mule_key }}
+          connectedAppClientId: ${{ secrets.connected_app_client_id }}
+          connectedAppClientSecret: ${{ secrets.connected_app_client_secret }}
+          clientId: ${{ secrets.anypoint_client_id }}
+          clientSecret: ${{ secrets.anypoint_client_secret }}
+          target: ${{ vars.target }} 
+          releaseChannel: ${{ vars.release_channel }} 
+          wireLogging: ${{ vars.wire_logging_log_level }}
+          replicas: ${{ vars.replicas }}
+          vcores: ${{ vars.vcores }}
+          extraArgs: ${{ steps.generate_args.outputs.ARG_STRING }}
+          customAppName: ${{ inputs.app_name }}
+
+      - name: Set next development cycle
+        if: ${{ inputs.environment == 'QA' }}
+        run: |
+          mvn versions:set -DnextSnapshot versions:commit
+          version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          
+          git checkout develop
+          git add pom.xml
+          git commit -m "Increase version to $version for next development cycle"
+          git push https://x-access-token:$githubToken@github.com/${{ github.repository }}.git develop
+        shell: bash
+        env:
+          githubToken: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge to Main 
+        if: ${{ startsWith(github.ref, 'refs/tags/') && inputs.environment == 'CHANGE_TO_PRD_WHEN_ENABLED' }}
+        run: |
+          SOURCE_TAG=${{ github.ref_name }}
+          TEMP_BRANCH="release-from-tag-${SOURCE_TAG//\//-}"
+
+          echo "Creating temp branch '$TEMP_BRANCH' from tag '$SOURCE_TAG'..."
+          git fetch origin tag "$SOURCE_TAG"
+          git checkout -b "$TEMP_BRANCH" "refs/tags/$SOURCE_TAG"
+          git push origin "$TEMP_BRANCH"
+
+          echo "Creating PR from '$TEMP_BRANCH' into main..."
+          gh pr create \
+            --title "Release: Merge $SOURCE_TAG into main" \
+            --body "Automated PR to merge release from tag $SOURCE_TAG into main." \
+            --base main \
+            --head "$TEMP_BRANCH"
+
+          PR_NUMBER=$(gh pr list --base main --head "$TEMP_BRANCH" --json number --jq '.[0].number')
+          echo "PR #$PR_NUMBER created from tag '$SOURCE_TAG'."
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
