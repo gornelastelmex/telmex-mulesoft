@@ -23,7 +23,7 @@ jobs:
   build:
     runs-on: #ubuntu-latest
       group: gps-github-test-runners
-    timeout-minutes: 15
+    timeout-minutes: 25
     environment: ${{ github.event.inputs.environment }}  
     steps:
       - name: Checkout this repo
@@ -51,19 +51,44 @@ jobs:
         run: |
           mvn versions:set -DremoveSnapshot versions:commit
           version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
-          
+      
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
-
+      
+          branch="release/$version"
+          git checkout -b "$branch"
+      
           git add pom.xml
           git commit -m "Create release $version"
-          git push https://x-access-token:$githubToken@github.com/${{ github.repository }}.git dev
-
-          git tag $version
-          git push https://x-access-token:$githubToken@github.com/${{ github.repository }}.git $version
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git "$branch"
+      
+          pr_url=$(gh pr create \
+            --title "Release $version" \
+            --body "Automated release PR for $version" \
+            --head "$branch" \
+            --base dev \
+            --repo "${{ github.repository }}" | grep 'https://github.com/' | head -1)
+      
+          gh pr merge "$pr_url" \
+            --squash \
+            --auto \
+            --delete-branch \
+            --repo "${{ github.repository }}"
+      
+          echo "⏳ Esperando merge..."
+          while gh pr view "$pr_url" --json merged --jq .merged | grep false; do
+            sleep 5
+          done
+      
+          git fetch origin dev
+          git checkout dev
+          git pull origin dev
+      
+          git tag "$version"
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git "$version"
         shell: bash
         env:
-          githubToken: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build with Maven
         run: |
@@ -93,6 +118,11 @@ jobs:
       - name: Checkout this repo
         uses: actions/checkout@v4
       
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          distribution: "zulu"
+          java-version: 17
       - name: Build GitHub Property Args from pom.xml (vars only)
         id: generate_args
         run: |
