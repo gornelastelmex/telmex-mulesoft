@@ -51,38 +51,54 @@ jobs:
         run: |
           mvn versions:set -DremoveSnapshot versions:commit
           version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
-      
+          branch="release/$version"
+
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
-      
-          branch="release/$version"
+          
           git checkout -b "$branch"
-      
           git add pom.xml
           git commit -m "Create release $version"
           git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git "$branch"
-      
-          pr_url=$(gh pr create \
+
+          PR_URL=$(gh pr create \
             --title "Release $version" \
-            --body "Automated release PR for $version" \
+            --body "Automated release PR for version $version. Waiting for approval to merge." \
             --head "$branch" \
-            --base dev \
-            --repo "${{ github.repository }}" | grep 'https://github.com/' | head -1)
-      
-          gh pr merge "$pr_url" \
-            --squash \
-            --delete-branch \
-            --repo "${{ github.repository }}"
-      
-          echo "⏳ Esperando merge..."
-          while gh pr view "$pr_url" --json merged --jq .merged | grep false; do
-            sleep 5
+            --base dev)
+          
+          echo "✅ PR creado en: $PR_URL"
+          echo "---"
+          echo "⏳ Esperando aprobación y que los checks pasen..."
+          
+          # Timeout de 1 hora (120 intentos de 30 segundos cada uno)
+          max_attempts=120
+          attempt=0
+          
+          while [ $attempt -lt $max_attempts ]; do
+            merge_state=$(gh pr view "$PR_URL" --json mergeable --jq .mergeable)
+            
+            if [ "$merge_state" = "MERGEABLE" ]; then
+              echo "✅ PR aprobado y listo para fusionar."
+              break
+            elif [ "$merge_state" = "CONFLICTING" ]; then
+              echo "❌ ERROR: El PR tiene conflictos. Abortando."
+              exit 1
+            else
+              echo "El PR todavía no está listo (Estado: $merge_state). Esperando 30 segundos..."
+              sleep 30
+            fi
+            
+            attempt=$((attempt + 1))
           done
-      
-          git fetch origin dev
-          git checkout dev
-          git pull origin dev
-      
+
+          if [ $attempt -eq $max_attempts ]; then
+            echo "❌ ERROR: Timeout. El PR no fue aprobado o los checks no pasaron en 1 hora."
+            exit 1
+          fi
+
+          gh pr merge "$PR_URL" --squash --delete-branch
+
           git tag "$version"
           git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git "$version"
         shell: bash
