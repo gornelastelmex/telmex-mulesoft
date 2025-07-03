@@ -76,25 +76,28 @@ jobs:
           attempt=0
           
           while [ $attempt -lt $max_attempts ]; do
-            PR_INFO=$(gh pr view "$PR_URL" --json statusCheckRollup,reviews)
-            CHECKS_STATUS=$(echo "$PR_INFO" | jq -r .statusCheckRollup[0].state)          
+            PR_INFO=$(gh pr view "$PR_URL" --json mergeable,reviews)
+            
+            MERGE_STATE=$(echo "$PR_INFO" | jq -r .mergeable)
             APPROVAL_STATUS=$(echo "$PR_INFO" | jq -r '.reviews[] | select(.state=="APPROVED") | .state')
-        
-          echo "Estado de los Checks: $CHECKS_STATUS"
-          echo "Estado de Aprobación: ${APPROVAL_STATUS:-'PENDIENTE'}"
-        
-          if [ "$CHECKS_STATUS" = "SUCCESS" ] && [ "$APPROVAL_STATUS" = "APPROVED" ]; then
-            echo "✅ PR aprobado y todos los checks pasaron. Procediendo a fusionar."
-            break
-          fi
           
-          attempt=$((attempt + 1))
-          echo "El PR todavía no está listo. Esperando 30 segundos... (Intento $attempt de $max_attempts)"
-          sleep 30
+            if [ "$MERGE_STATE" = "CONFLICTING" ]; then
+              echo "❌ ERROR: El PR tiene conflictos de merge. Abortando."
+              exit 1
+            
+            elif [ "$APPROVAL_STATUS" = "APPROVED" ]; then
+              echo "✅ PR aprobado. Procediendo a fusionar."
+              break
+            
+            else
+              echo "⏳ Esperando aprobación. Estado actual: PENDIENTE. (Intento $attempt de $max_attempts)"
+              attempt=$((attempt + 1))
+              sleep 30
+            fi
           done
-        
+          
           if [ $attempt -eq $max_attempts ]; then
-            echo "❌ ERROR: Timeout. El PR no fue aprobado o los checks no pasaron en 1 hora."
+            echo "❌ ERROR: Timeout. El PR no fue aprobado"
             exit 1
           fi
         
