@@ -34,8 +34,8 @@ permissions:
 
 jobs:
   build:
-    runs-on: #ubuntu-latest
-      group: gps-github-test-runners
+    runs-on: ubuntu-latest
+      #group: gps-github-test-runners
     timeout-minutes: 15
     environment: ${{ inputs.environment }}  
     steps:
@@ -101,8 +101,8 @@ jobs:
   
   deploy:
     needs: build
-    runs-on: #ubuntu-latest
-      group: gps-github-test-runners
+    runs-on: ubuntu-latest
+      #group: gps-github-test-runners
     timeout-minutes: 15
     environment: ${{ inputs.environment }}
     steps:
