@@ -240,7 +240,7 @@ jobs:
           gh pr merge "$PR_URL" --squash --delete-branch --auto
         shell: bash
         env:
-          githubToken: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Merge to Main 
         if: ${{ startsWith(github.ref, 'refs/tags/') && github.event.inputs.environment == 'CHANGE_TO_PRD_WHEN_ENABLED' }}
