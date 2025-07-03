@@ -188,14 +188,57 @@ jobs:
         run: |
           mvn versions:set -DnextSnapshot versions:commit
           version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
-          
+          branch="chore/bump-version-${version}"
+
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
           
-          git checkout dev
+          git checkout -b "$branch"
           git add pom.xml
-          git commit -m "Increase version to $version for next development cycle"
-          git push https://x-access-token:$githubToken@github.com/${{ github.repository }}.git dev
+          git commit -m "Bump version to $version for next development cycle"
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git "$branch"
+
+          # 3. Crear el Pull Request hacia la rama 'dev'
+          PR_URL=$(gh pr create \
+            --title "Bump version to $version" \
+            --body "Automated PR to set next development version to $version. Waiting for approval." \
+            --head "$branch" \
+            --base dev)
+          
+          echo "✅ PR para el nuevo ciclo de desarrollo creado en: $PR_URL"
+          echo "---"
+          echo "⏳ Esperando aprobación..."
+          
+          max_attempts=120
+          attempt=0
+          
+          while [ $attempt -lt $max_attempts ]; do
+            PR_INFO=$(gh pr view "$PR_URL" --json mergeable,reviews)
+            
+            MERGE_STATE=$(echo "$PR_INFO" | jq -r .mergeable)
+            APPROVAL_STATUS=$(echo "$PR_INFO" | jq -r '.reviews[] | select(.state=="APPROVED") | .state')
+            
+            if [ "$MERGE_STATE" = "CONFLICTING" ]; then
+              echo "❌ ERROR: El PR tiene conflictos de merge. Abortando."
+              exit 1
+            
+            elif [ "$APPROVAL_STATUS" = "APPROVED" ]; then
+              echo "✅ PR aprobado. Procediendo a fusionar."
+              break
+            
+            else
+              echo "⏳ Esperando aprobación. Estado actual: PENDIENTE. (Intento $attempt de $max_attempts)"
+              attempt=$((attempt + 1))
+              sleep 30
+            fi
+          done
+          
+          if [ $attempt -eq $max_attempts ]; then
+            echo "❌ ERROR: Timeout. El PR no fue aprobado."
+            exit 1
+          fi
+          
+          gh pr merge "$PR_URL" --squash --delete-branch --auto
         shell: bash
         env:
           githubToken: ${{ secrets.GITHUB_TOKEN }}
