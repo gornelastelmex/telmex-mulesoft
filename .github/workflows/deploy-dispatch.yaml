@@ -71,7 +71,6 @@ jobs:
       
           gh pr merge "$pr_url" \
             --squash \
-            --auto \
             --delete-branch \
             --repo "${{ github.repository }}"
       
