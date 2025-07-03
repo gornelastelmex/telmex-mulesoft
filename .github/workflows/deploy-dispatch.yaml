@@ -76,28 +76,29 @@ jobs:
           attempt=0
           
           while [ $attempt -lt $max_attempts ]; do
-            merge_state=$(gh pr view "$PR_URL" --json mergeable --jq .mergeable)
-            
-            if [ "$merge_state" = "MERGEABLE" ]; then
-              echo "✅ PR aprobado y listo para fusionar."
-              break
-            elif [ "$merge_state" = "CONFLICTING" ]; then
-              echo "❌ ERROR: El PR tiene conflictos. Abortando."
-              exit 1
-            else
-              echo "El PR todavía no está listo (Estado: $merge_state). Esperando 30 segundos..."
-              sleep 30
-            fi
-            
-            attempt=$((attempt + 1))
+            PR_INFO=$(gh pr view "$PR_URL" --json statusCheckRollup,reviews)
+            CHECKS_STATUS=$(echo "$PR_INFO" | jq -r .statusCheckRollup[0].state)          
+            APPROVAL_STATUS=$(echo "$PR_INFO" | jq -r '.reviews[] | select(.state=="APPROVED") | .state')
+        
+          echo "Estado de los Checks: $CHECKS_STATUS"
+          echo "Estado de Aprobación: ${APPROVAL_STATUS:-'PENDIENTE'}"
+        
+          if [ "$CHECKS_STATUS" = "SUCCESS" ] && [ "$APPROVAL_STATUS" = "APPROVED" ]; then
+            echo "✅ PR aprobado y todos los checks pasaron. Procediendo a fusionar."
+            break
+          fi
+          
+          attempt=$((attempt + 1))
+          echo "El PR todavía no está listo. Esperando 30 segundos... (Intento $attempt de $max_attempts)"
+          sleep 30
           done
-
+        
           if [ $attempt -eq $max_attempts ]; then
             echo "❌ ERROR: Timeout. El PR no fue aprobado o los checks no pasaron en 1 hora."
             exit 1
           fi
-
-          gh pr merge "$PR_URL" --squash --delete-branch
+        
+          gh pr merge "$PR_URL" --squash --delete-branch --auto
 
           git tag "$version"
           git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git "$version"
