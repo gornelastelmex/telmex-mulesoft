@@ -30,7 +30,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.ref }}
+          ref: ${{ github.ref_name }}
 
       - name: Cache dependencies
         uses: actions/cache@v4
@@ -51,38 +51,58 @@ jobs:
         run: |
           mvn versions:set -DremoveSnapshot versions:commit
           version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
-      
+          branch="release/$version"
+
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
-      
-          branch="release/$version"
+          
           git checkout -b "$branch"
-      
           git add pom.xml
           git commit -m "Create release $version"
           git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git "$branch"
-      
-          pr_url=$(gh pr create \
+
+          PR_URL=$(gh pr create \
             --title "Release $version" \
-            --body "Automated release PR for $version" \
+            --body "Automated release PR for version $version. Waiting for approval to merge." \
             --head "$branch" \
-            --base dev \
-            --repo "${{ github.repository }}" | grep 'https://github.com/' | head -1)
-      
-          gh pr merge "$pr_url" \
-            --squash \
-            --delete-branch \
-            --repo "${{ github.repository }}"
-      
-          echo "⏳ Esperando merge..."
-          while gh pr view "$pr_url" --json merged --jq .merged | grep false; do
-            sleep 5
+            --base dev)
+          
+          echo "✅ PR creado en: $PR_URL"
+          echo "---"
+          echo "⏳ Esperando aprobación y que los checks pasen..."
+          
+          # Timeout de 1 hora (120 intentos de 30 segundos cada uno)
+          max_attempts=120
+          attempt=0
+          
+          while [ $attempt -lt $max_attempts ]; do
+            PR_INFO=$(gh pr view "$PR_URL" --json mergeable,reviews)
+            
+            MERGE_STATE=$(echo "$PR_INFO" | jq -r .mergeable)
+            APPROVAL_STATUS=$(echo "$PR_INFO" | jq -r '.reviews[] | select(.state=="APPROVED") | .state')
+          
+            if [ "$MERGE_STATE" = "CONFLICTING" ]; then
+              echo "❌ ERROR: El PR tiene conflictos de merge. Abortando."
+              exit 1
+            
+            elif [ "$APPROVAL_STATUS" = "APPROVED" ]; then
+              echo "✅ PR aprobado. Procediendo a fusionar."
+              break
+            
+            else
+              echo "⏳ Esperando aprobación. Estado actual: PENDIENTE. (Intento $attempt de $max_attempts)"
+              attempt=$((attempt + 1))
+              sleep 30
+            fi
           done
-      
-          git fetch origin dev
-          git checkout dev
-          git pull origin dev
-      
+          
+          if [ $attempt -eq $max_attempts ]; then
+            echo "❌ ERROR: Timeout. El PR no fue aprobado"
+            exit 1
+          fi
+        
+          gh pr merge "$PR_URL" --squash --delete-branch --auto
+
           git tag "$version"
           git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git "$version"
         shell: bash
@@ -116,6 +136,9 @@ jobs:
     steps:
       - name: Checkout this repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_name }}
       
       - name: Set up JDK 17
         uses: actions/setup-java@v3
@@ -147,41 +170,83 @@ jobs:
           echo "ARG_STRING=$ARG_STRING" >> $GITHUB_OUTPUT
         shell: bash
       
-      - name: Deploy to CH2.0
-        uses: ./.github/actions
-        with:
-          targetEnvironment: ${{ github.event.inputs.environment }}
-          muleKey: ${{ secrets.mule_key }}
-          connectedAppClientId: ${{ secrets.connected_app_client_id }}
-          connectedAppClientSecret: ${{ secrets.connected_app_client_secret }}
-          clientId: ${{ secrets.anypoint_client_id }}
-          clientSecret: ${{ secrets.anypoint_client_secret }}
-          target: ${{ vars.target }} 
-          releaseChannel: ${{ vars.release_channel }} 
-          wireLogging: ${{ vars.wire_logging_log_level }}
-          replicas: ${{ vars.replicas }}
-          vcores: ${{ vars.vcores }}
-          extraArgs: ${{ steps.generate_args.outputs.ARG_STRING }}
+      #- name: Deploy to CH2.0
+      #  uses: ./.github/actions
+      #  with:
+      #    targetEnvironment: ${{ github.event.inputs.environment }}
+      #    muleKey: ${{ secrets.mule_key }}
+      #    connectedAppClientId: ${{ secrets.connected_app_client_id }}
+      #    connectedAppClientSecret: ${{ secrets.connected_app_client_secret }}
+      #    clientId: ${{ secrets.anypoint_client_id }}
+      #    clientSecret: ${{ secrets.anypoint_client_secret }}
+      #    target: ${{ vars.target }} 
+      #    releaseChannel: ${{ vars.release_channel }} 
+      #    wireLogging: ${{ vars.wire_logging_log_level }}
+      #    replicas: ${{ vars.replicas }}
+      #    vcores: ${{ vars.vcores }}
+      #    extraArgs: ${{ steps.generate_args.outputs.ARG_STRING }}
 
       - name: Set next development cycle
         if: ${{ github.event.inputs.environment == 'QA' }}
         run: |
           mvn versions:set -DnextSnapshot versions:commit
           version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
-          
+          branch="chore/bump-version-${version}"
+
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
           
-          git checkout dev
+          git checkout -b "$branch"
           git add pom.xml
-          git commit -m "Increase version to $version for next development cycle"
-          git push https://x-access-token:$githubToken@github.com/${{ github.repository }}.git dev
+          git commit -m "Bump version to $version for next development cycle"
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git "$branch"
+
+          PR_URL=$(gh pr create \
+            --title "Bump version to $version" \
+            --body "Automated PR to set next development version to $version. Waiting for approval." \
+            --head "$branch" \
+            --base dev)
+          
+          echo "✅ PR para el nuevo ciclo de desarrollo creado en: $PR_URL"
+          echo "---"
+          echo "⏳ Esperando aprobación..."
+          
+          max_attempts=120
+          attempt=0
+          
+          while [ $attempt -lt $max_attempts ]; do
+            PR_INFO=$(gh pr view "$PR_URL" --json mergeable,reviews)
+            
+            MERGE_STATE=$(echo "$PR_INFO" | jq -r .mergeable)
+            APPROVAL_STATUS=$(echo "$PR_INFO" | jq -r '.reviews[] | select(.state=="APPROVED") | .state')
+            
+            if [ "$MERGE_STATE" = "CONFLICTING" ]; then
+              echo "❌ ERROR: El PR tiene conflictos de merge. Abortando."
+              exit 1
+            
+            elif [ "$APPROVAL_STATUS" = "APPROVED" ]; then
+              echo "✅ PR aprobado. Procediendo a fusionar."
+              break
+            
+            else
+              echo "⏳ Esperando aprobación. Estado actual: PENDIENTE. (Intento $attempt de $max_attempts)"
+              attempt=$((attempt + 1))
+              sleep 30
+            fi
+          done
+          
+          if [ $attempt -eq $max_attempts ]; then
+            echo "❌ ERROR: Timeout. El PR no fue aprobado."
+            exit 1
+          fi
+          
+          gh pr merge "$PR_URL" --squash --delete-branch --auto
         shell: bash
         env:
-          githubToken: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Merge to Main 
-        if: ${{ startsWith(github.ref, 'refs/tags/') && github.event.inputs.environment == 'CHANGE_TO_PRD_WHEN_ENABLED' }}
+        if: ${{ startsWith(github.ref, 'refs/tags/') && github.event.inputs.environment == 'PRD' }}
         run: |
           SOURCE_TAG=${{ github.ref_name }}
           TEMP_BRANCH="release-from-tag-${SOURCE_TAG//\//-}"
